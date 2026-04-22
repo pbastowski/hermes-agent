@@ -23,6 +23,7 @@ from agent.model_metadata import (
     CONTEXT_PROBE_TIERS,
     DEFAULT_CONTEXT_LENGTHS,
     _strip_provider_prefix,
+    _get_custom_provider_context_length,
     estimate_tokens_rough,
     estimate_messages_tokens_rough,
     get_model_context_length,
@@ -712,3 +713,126 @@ class TestContextLengthCache:
         with patch("agent.model_metadata._get_context_cache_path", return_value=cache_file):
             save_context_length(model, url, 200000)
             assert get_cached_context_length(model, url) == 200000
+
+
+# =========================================================================
+# _get_custom_provider_context_length — auto mode context length inheritance
+# =========================================================================
+
+class TestGetCustomProviderContextLength:
+    """Tests for _get_custom_provider_context_length() helper function."""
+
+    @patch("hermes_cli.config.get_compatible_custom_providers")
+    @patch("hermes_cli.config.load_config")
+    def test_returns_context_length_from_custom_provider(self, mock_load_config, mock_get_providers):
+        """When base_url matches a custom provider with context_length, return it."""
+        mock_load_config.return_value = {
+            "custom_providers": [
+                {
+                    "name": "Local (oMLX:4328)",
+                    "base_url": "http://127.0.0.1:4328/v1",
+                    "model": "bearzi/Qwen3-Coder-Next-oQ8",
+                    "models": {
+                        "bearzi/Qwen3-Coder-Next-oQ8": {"context_length": 230000},
+                    },
+                }
+            ]
+        }
+        mock_get_providers.return_value = [
+            {
+                "name": "Local (oMLX:4328)",
+                "base_url": "http://127.0.0.1:4328/v1",
+                "model": "bearzi/Qwen3-Coder-Next-oQ8",
+                "models": {
+                    "bearzi/Qwen3-Coder-Next-oQ8": {"context_length": 230000},
+                },
+            }
+        ]
+
+        result = _get_custom_provider_context_length(
+            "bearzi/Qwen3-Coder-Next-oQ8",
+            "http://127.0.0.1:4328/v1"
+        )
+        assert result == 230000
+
+    @patch("hermes_cli.config.get_compatible_custom_providers")
+    @patch("hermes_cli.config.load_config")
+    def test_returns_none_when_base_url_does_not_match(self, mock_load_config, mock_get_providers):
+        """When base_url doesn't match any custom provider, return None."""
+        mock_load_config.return_value = {"custom_providers": [
+            {"name": "Test", "base_url": "http://127.0.0.1:9999/v1", "models": {}}
+        ]}
+        mock_get_providers.return_value = [
+            {"name": "Test", "base_url": "http://127.0.0.1:9999/v1", "models": {}}
+        ]
+
+        result = _get_custom_provider_context_length(
+            "some/model",
+            "http://127.0.0.1:8888/v1"  # Different port
+        )
+        assert result is None
+
+    @patch("hermes_cli.config.get_compatible_custom_providers")
+    @patch("hermes_cli.config.load_config")
+    def test_returns_provider_level_context_length(self, mock_load_config, mock_get_providers):
+        """Context length can be set at provider level (not just per-model)."""
+        mock_load_config.return_value = {"custom_providers": [
+            {
+                "name": "Test Provider",
+                "base_url": "http://localhost:4321/v1",
+                "context_length": 200000,
+                "model": "some/model",
+                "models": {}
+            }
+        ]}
+        mock_get_providers.return_value = [
+            {
+                "name": "Test Provider",
+                "base_url": "http://localhost:4321/v1",
+                "context_length": 200000,
+                "model": "some/model",
+                "models": {}
+            }
+        ]
+
+        result = _get_custom_provider_context_length("some/model", "http://localhost:4321/v1")
+        assert result == 200000
+
+    @patch("hermes_cli.config.get_compatible_custom_providers")
+    @patch("hermes_cli.config.load_config")
+    def test_case_insensitive_model_match(self, mock_load_config, mock_get_providers):
+        """Model matching is case-insensitive."""
+        mock_load_config.return_value = {"custom_providers": [
+            {
+                "name": "Test",
+                "base_url": "http://localhost:4321/v1",
+                "models": {
+                    "BEARZI/QWEN3-CODER-NEXT-OQ8": {"context_length": 230000},
+                },
+            }
+        ]}
+        mock_get_providers.return_value = [
+            {
+                "name": "Test",
+                "base_url": "http://localhost:4321/v1",
+                "models": {
+                    "BEARZI/QWEN3-CODER-NEXT-OQ8": {"context_length": 230000},
+                },
+            }
+        ]
+
+        result = _get_custom_provider_context_length(
+            "bearzi/qwen3-coder-next-oq8",
+            "http://localhost:4321/v1"
+        )
+        assert result == 230000
+
+    @patch("hermes_cli.config.get_compatible_custom_providers")
+    @patch("hermes_cli.config.load_config")
+    def test_returns_none_when_import_fails(self, mock_load_config, mock_get_providers):
+        """When hermes_cli.config is unavailable, return None gracefully."""
+        mock_load_config.side_effect = ImportError("hermes_cli.config not available")
+        mock_get_providers.return_value = []
+
+        result = _get_custom_provider_context_length("some/model", "http://localhost:4321/v1")
+        assert result is None
