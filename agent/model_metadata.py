@@ -1033,6 +1033,15 @@ def get_model_context_length(
     if config_context_length is not None and isinstance(config_context_length, int) and config_context_length > 0:
         return config_context_length
 
+    # 0b. Custom provider context length (for auto mode auxiliary tasks)
+    # When auxiliary.*.model is empty (auto), the resolved model comes from
+    # the main provider, but get_model_context_length doesn't know it's auto.
+    # Check if base_url matches a custom provider with context_length.
+    if base_url:
+        custom_ctx = _get_custom_provider_context_length(model, base_url)
+        if custom_ctx is not None:
+            return custom_ctx
+
     # Normalise provider-prefixed model names (e.g. "local:model-name" →
     # "model-name") so cache lookups and server queries use the bare ID that
     # local servers actually know about.  Ollama "model:tag" colons are preserved.
@@ -1150,6 +1159,61 @@ def get_model_context_length(
 
     # 10. Default fallback — 128K
     return DEFAULT_FALLBACK_CONTEXT
+
+
+def _get_custom_provider_context_length(model: str, base_url: str) -> Optional[int]:
+    """Get context length from custom_providers config for a model+base_url.
+    
+    Used when auxiliary.* tasks use auto mode (empty model) and should inherit
+    the main model's context length from the custom provider config.
+    """
+    try:
+        from hermes_cli.config import get_compatible_custom_providers, load_config
+        config = load_config()
+        providers = get_compatible_custom_providers(config)
+    except ImportError:
+        return None
+    
+    if not isinstance(providers, list):
+        return None
+    
+    # Normalize base_url for comparison (strip /v1 suffix if present)
+    normalized_base_url = base_url.rstrip("/")
+    if normalized_base_url.endswith("/v1"):
+        normalized_base_url = normalized_base_url[:-3]
+    
+    # Normalize model for comparison (case-insensitive)
+    normalized_model = model.lower()
+    
+    for entry in providers:
+        if not isinstance(entry, dict):
+            continue
+        
+        entry_base_url = entry.get("base_url", "").rstrip("/")
+        if entry_base_url.endswith("/v1"):
+            entry_base_url = entry_base_url[:-3]
+        
+        if entry_base_url != normalized_base_url:
+            continue
+        
+        # Found matching base_url, check for context_length at provider level
+        provider_ctx = entry.get("context_length")
+        if isinstance(provider_ctx, int) and provider_ctx > 0:
+            return provider_ctx
+        
+        # Check per-model context_length in models dict
+        models = entry.get("models")
+        if isinstance(models, dict):
+            for model_key, model_entry in models.items():
+                if not isinstance(model_entry, dict):
+                    continue
+                # Check for exact match (case-insensitive) or substring match
+                if model_key.lower() == normalized_model or normalized_model in model_key.lower():
+                    ctx = model_entry.get("context_length")
+                    if isinstance(ctx, int) and ctx > 0:
+                        return ctx
+    
+    return None
 
 
 def estimate_tokens_rough(text: str) -> int:
